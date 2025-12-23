@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Loop through all files in current folder
+for f in *; do
+    # Skip directories (don't process apps we just made)
+    if [[ -d "$f" ]]; then continue; fi
+    
+    # 1. Resolve Alias Target
+    TARGET=$(osascript -e "tell application \"Finder\" to get POSIX path of ((original item of (POSIX file \"$(pwd)/$f\" as alias)) as text)" 2>/dev/null)
+
+    # Validation: Ensure target exists and is an .app
+    if [[ -z "$TARGET" || "$TARGET" != *.app* ]]; then
+        f_display=${f//$'\r'/}
+        printf "⏭️  Skipped '%s' (Not a valid alias to an Application)\n" "$f_display"
+        continue
+    fi
+
+    # Clean up name for the new Launcher
+    APP_NAME="${f%.*}"
+    WRAPPER="$APP_NAME.app"
+    
+    echo "Processing: $APP_NAME..."
+
+    # 2. Build App Structure
+    mkdir -p "$WRAPPER/Contents/MacOS"
+    mkdir -p "$WRAPPER/Contents/Resources"
+
+    # 3. create Instant Launcher Script
+    cat <<EOF > "$WRAPPER/Contents/MacOS/$APP_NAME"
+#!/bin/sh
+exec open "$TARGET"
+EOF
+    chmod +x "$WRAPPER/Contents/MacOS/$APP_NAME"
+
+    # 4. SMART ICON EXTRACTION
+    # Read the real Info.plist to find the exact name of the icon file
+    ICON_NAME=$(defaults read "$TARGET/Contents/Info" CFBundleIconFile 2>/dev/null)
+    
+    # If the plist result doesn't end in .icns, append it
+    if [[ "$ICON_NAME" != *".icns" ]]; then
+        ICON_NAME="$ICON_NAME.icns"
+    fi
+
+    # Locate the actual file
+    REAL_ICON_PATH="$TARGET/Contents/Resources/$ICON_NAME"
+
+    # Link the icon (Symlink ensures full resolution)
+    if [[ -f "$REAL_ICON_PATH" ]]; then
+        ln -sf "$REAL_ICON_PATH" "$WRAPPER/Contents/Resources/$ICON_NAME"
+    else
+        # Fallback: Find the biggest .icns if the plist method fails
+        FALLBACK_ICON=$(find "$TARGET/Contents/Resources" -name "*.icns" -size +100k | head -n 1)
+        if [[ -f "$FALLBACK_ICON" ]]; then
+             ICON_NAME=$(basename "$FALLBACK_ICON")
+             ln -sf "$FALLBACK_ICON" "$WRAPPER/Contents/Resources/$ICON_NAME"
+        else
+            ICON_NAME="AppIcon.icns" # Dead fallback
+        fi
+    fi
+
+    # 5. Create Info.plist pointing to that specific icon name
+    cat <<EOF > "$WRAPPER/Contents/Info.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>$ICON_NAME</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.generated.$APP_NAME</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+    # 6. Touch to refresh cache
+    touch "$WRAPPER"
+    echo "✅ Created $WRAPPER"
+done
